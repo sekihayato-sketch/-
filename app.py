@@ -19,6 +19,22 @@ st.title("Fiber Delay Adjustment Tool - ABS Target / Cut-only")
 st.caption("Decision uses |delay| vs target. Adjustment is CUT-only (no add).")
 
 # =====================================================
+# Global UI / Settings
+# =====================================================
+with st.expander("Settings (History / Visualization)", expanded=True):
+    colS1, colS2, colS3 = st.columns(3)
+    with colS1:
+        log_ok = st.checkbox("Record OK (within tolerance) into history", value=False)
+        log_only_when_button = st.checkbox("Append to history only on button press", value=True)
+    with colS2:
+        show_status_viz = st.checkbox("Show status visualization (target band)", value=True)
+        show_timing_viz = st.checkbox("Show ch1/ch2 timing diagram", value=True)
+    with colS3:
+        if st.button("Clear history", type="secondary"):
+            st.session_state.log = []
+            st.toast("History cleared.", icon="🧹")
+
+# =====================================================
 # Inputs
 # =====================================================
 colA, colB, colC = st.columns(3)
@@ -41,6 +57,8 @@ mode = st.radio("Mode", ["Manual input", "CSV"], horizontal=True)
 # =====================================================
 if "log" not in st.session_state:
     st.session_state.log = []
+if "last_result" not in st.session_state:
+    st.session_state.last_result = None  # store last computed result for display continuity
 
 # =====================================================
 # Helper functions
@@ -106,13 +124,11 @@ def cut_only_decision_abs_target(delay_s_raw: float, late_side: str):
     ABS target (|delay| = target_ps), Cut-only:
       |delay| > target  -> CUT LATE side (reduce |delay|)
       |delay| < target  -> CUT EARLY side (increase |delay| by cutting early side)
-    NOTE:
-      You provide late_side as the longer side.
     """
     ng = ng_dispersion(wavelength)
 
     delay_corr_s = corrected_delay_s(delay_s_raw)
-    measured_ps_raw = delay_corr_s * 1e12
+    measured_ps_raw = delay_corr_s * 1e12  # signed corrected ps
     measured_abs = abs(measured_ps_raw)
 
     diff = measured_abs - target_ps
@@ -121,14 +137,15 @@ def cut_only_decision_abs_target(delay_s_raw: float, late_side: str):
     early_side = "ch1" if late_side == "ch2" else "ch2"
 
     result = {
-        "measured_ps_raw": measured_ps_raw,
-        "measured_ps_abs": measured_abs,
-        "diff_ps": diff,
+        "measured_ps_raw": float(measured_ps_raw),
+        "measured_ps_abs": float(measured_abs),
+        "diff_ps": float(diff),
         "late_side": late_side,
         "early_side": early_side,
         "cut_side": None,
         "delta_mm": 0.0,
-        "note": ""
+        "note": "",
+        "delay_s_raw": float(delay_s_raw),  # for timing diagram (raw)
     }
 
     if within:
@@ -154,7 +171,166 @@ def cut_only_decision_abs_target(delay_s_raw: float, late_side: str):
     return result
 
 # =====================================================
-# Plot helpers (Plotly)
+# Visualization (1) Status band + marker (target ± tol)
+# =====================================================
+def plot_status_band(measured_abs_ps: float, target_ps: float, tol_ps: float):
+    lo = target_ps - tol_ps
+    hi = target_ps + tol_ps
+    xmax = max(target_ps, measured_abs_ps) * 1.25
+    xmax = max(xmax, target_ps + 5 * tol_ps, 10)
+
+    # classification
+    if measured_abs_ps < lo:
+        state = "TOO SHORT"
+        color = "#2E86FF"
+    elif measured_abs_ps > hi:
+        state = "TOO LONG"
+        color = "#FF4B4B"
+    else:
+        state = "OK"
+        color = "#2ECC71"
+
+    fig = go.Figure()
+
+    # tolerance band
+    fig.add_shape(type="rect",
+                  x0=lo, x1=hi, y0=0.15, y1=0.85,
+                  fillcolor="rgba(46,204,113,0.20)", line_width=0)
+
+    # base axis line
+    fig.add_trace(go.Scatter(
+        x=[0, xmax],
+        y=[0.5, 0.5],
+        mode="lines",
+        line=dict(color="rgba(120,120,120,0.6)", width=6),
+        hoverinfo="skip",
+        showlegend=False
+    ))
+
+    # target line
+    fig.add_shape(type="line",
+                  x0=target_ps, x1=target_ps, y0=0.1, y1=0.9,
+                  line=dict(color="rgba(0,0,0,0.8)", width=2, dash="dash"))
+
+    # measured marker
+    fig.add_trace(go.Scatter(
+        x=[measured_abs_ps],
+        y=[0.5],
+        mode="markers+text",
+        marker=dict(size=18, color=color, line=dict(color="black", width=1)),
+        text=[f"{state}<br>|delay|={measured_abs_ps:.3f} ps"],
+        textposition="top center",
+        showlegend=False
+    ))
+
+    fig.update_layout(
+        title="Status: |delay| vs target (tolerance band)",
+        xaxis_title="|delay| (ps)",
+        yaxis=dict(visible=False, range=[0, 1]),
+        xaxis=dict(range=[0, xmax]),
+        height=260,
+        margin=dict(l=10, r=10, t=45, b=10),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+# =====================================================
+# Visualization (2) Timing diagram for ch1/ch2 relation
+# =====================================================
+def plot_timing_diagram(delay_raw_ps: float, late_side: str, early_side: str):
+    """
+    Draw a simple timing diagram:
+    - ch1 event at t=0
+    - ch2 event at t=delay_raw_ps (signed)
+    """
+    # Set reference points
+    t1 = 0.0
+    t2 = float(delay_raw_ps)
+
+    # Choose axis span
+    span = max(abs(t2), 5.0) * 1.4
+    xmin, xmax = -span, span
+
+    fig = go.Figure()
+
+    # horizontal baselines
+    fig.add_trace(go.Scatter(
+        x=[xmin, xmax], y=[1, 1],
+        mode="lines",
+        line=dict(color="rgba(80,80,80,0.5)", width=4),
+        showlegend=False,
+        hoverinfo="skip"
+    ))
+    fig.add_trace(go.Scatter(
+        x=[xmin, xmax], y=[0, 0],
+        mode="lines",
+        line=dict(color="rgba(80,80,80,0.5)", width=4),
+        showlegend=False,
+        hoverinfo="skip"
+    ))
+
+    # event markers
+    fig.add_trace(go.Scatter(
+        x=[t1], y=[1],
+        mode="markers+text",
+        marker=dict(size=14, color="#444", line=dict(color="black", width=1)),
+        text=["ch1"],
+        textposition="top center",
+        showlegend=False
+    ))
+    fig.add_trace(go.Scatter(
+        x=[t2], y=[0],
+        mode="markers+text",
+        marker=dict(size=14, color="#444", line=dict(color="black", width=1)),
+        text=["ch2"],
+        textposition="bottom center",
+        showlegend=False
+    ))
+
+    # arrow showing lag direction
+    fig.add_annotation(
+        x=t2, y=0.05,
+        ax=t1, ay=0.95,
+        xref="x", yref="y",
+        axref="x", ayref="y",
+        text=f"raw delay = {t2:.3f} ps",
+        showarrow=True,
+        arrowhead=3,
+        arrowsize=1.1,
+        arrowwidth=2,
+        arrowcolor="rgba(0,0,0,0.8)"
+    )
+
+    # labels for late/early
+    fig.add_annotation(
+        x=xmax*0.95, y=0.92, xref="x", yref="y",
+        text=f"Late (longer): <b>{late_side}</b>",
+        showarrow=False
+    )
+    fig.add_annotation(
+        x=xmax*0.95, y=0.08, xref="x", yref="y",
+        text=f"Early (shorter): <b>{early_side}</b>",
+        showarrow=False
+    )
+
+    fig.update_layout(
+        title="Timing diagram (ch1/ch2 relation)",
+        xaxis_title="time (ps) [raw from correlation lag]",
+        yaxis=dict(
+            tickmode="array",
+            tickvals=[0, 1],
+            ticktext=["ch2 baseline", "ch1 baseline"],
+            range=[-0.4, 1.4]
+        ),
+        xaxis=dict(range=[xmin, xmax], zeroline=True, zerolinewidth=1),
+        height=300,
+        margin=dict(l=10, r=10, t=45, b=10),
+        showlegend=False
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+# =====================================================
+# Plot helpers (Waveforms / Correlation)
 # =====================================================
 def plot_waveforms(t_s, ch1, ch2, title="Waveforms", time_unit="s"):
     # time axis in chosen unit for display
@@ -174,27 +350,48 @@ def plot_waveforms(t_s, ch1, ch2, title="Waveforms", time_unit="s"):
     )
     st.plotly_chart(fig, use_container_width=True)
 
-def plot_correlation(corr, lag_samples, title="Cross-correlation"):
-    corr = np.asarray(corr, dtype=float)
-    lags = np.arange(-(len(corr)//2), len(corr) - (len(corr)//2))  # fallback
-    # Better lags: when corr = correlate(x,y,'full'), length=2N-1, lags=-(N-1)..(N-1)
-    # We'll infer N from corr length (odd), N=(len(corr)+1)/2
-    if len(corr) % 2 == 1:
-        N = (len(corr) + 1) // 2
-        lags = np.arange(-(N - 1), (N - 1) + 1)
-
+def plot_correlation(corr, lag_samples, N):
+    lags = np.arange(-(N - 1), (N - 1) + 1)
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=lags, y=corr, mode="lines", name="xcorr"))
     fig.add_vline(x=lag_samples, line_dash="dash", line_color="red")
     fig.update_layout(
-        title=title,
+        title="Cross-correlation (peak = estimated lag)",
         xaxis_title="lag (samples)",
         yaxis_title="correlation",
         height=300,
         margin=dict(l=10, r=10, t=40, b=10),
-        showlegend=False,
+        showlegend=False
     )
     st.plotly_chart(fig, use_container_width=True)
+
+# =====================================================
+# History helper
+# =====================================================
+def append_history(res: dict, extra: dict = None):
+    """
+    Append to history with gating:
+      - only when button pressed (already ensured by caller)
+      - record OK only if log_ok is True
+    """
+    if (res.get("cut_side") is None) and (not log_ok):
+        return  # do not record OK by default
+
+    row = {
+        "mode": res.get("mode", ""),
+        "measured_ps_signed": float(res["measured_ps_raw"]),
+        "measured_ps_abs": float(res["measured_ps_abs"]),
+        "target_ps": float(target_ps),
+        "diff_ps": float(res["diff_ps"]),
+        "late_side": res["late_side"],
+        "early_side": res["early_side"],
+        "cut_side": res["cut_side"] if res["cut_side"] is not None else "OK",
+        "delta_mm": float(res["delta_mm"]),
+        "note": res["note"],
+    }
+    if extra:
+        row.update(extra)
+    st.session_state.log.append(row)
 
 # =====================================================
 # Manual Mode
@@ -202,39 +399,48 @@ def plot_correlation(corr, lag_samples, title="Cross-correlation"):
 if mode == "Manual input":
     st.subheader("Manual input")
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns([1.2, 1.2, 1.0])
     with col1:
         measured_ps_input = st.number_input("Measured delay (ps, signed)", value=500.0, step=1.0)
     with col2:
         late_side_manual = st.radio("Late side (longer)", ["ch1", "ch2"], horizontal=True)
+    with col3:
+        run_manual = st.button("Compute (Manual)", type="primary")
 
-    delay_s_raw = measured_ps_input * 1e-12
-    res = cut_only_decision_abs_target(delay_s_raw, late_side_manual)
+    if run_manual:
+        delay_s_raw = measured_ps_input * 1e-12
+        res = cut_only_decision_abs_target(delay_s_raw, late_side_manual)
+        res["mode"] = "Manual"
+        st.session_state.last_result = res  # keep last for display
 
-    st.subheader("Result")
-    st.write(f"Measured (corrected, signed): **{res['measured_ps_raw']:.3f} ps**")
-    st.write(f"|delay| used for decision: **{res['measured_ps_abs']:.3f} ps**")
-    st.write(f"|delay| - target = **{res['diff_ps']:.3f} ps**")
-    st.write(f"Late (longer): **{res['late_side']}** / Early (shorter): **{res['early_side']}**")
+        # Append history only on button press (and OK gated by log_ok)
+        if log_only_when_button:
+            append_history(res)
+        else:
+            append_history(res)  # same here; left for future option
 
-    if res["cut_side"] is None:
-        st.success(res["note"])
+    # Display last result if exists (does not add history)
+    if st.session_state.last_result and st.session_state.last_result.get("mode") == "Manual":
+        res = st.session_state.last_result
+
+        st.subheader("Result")
+        st.write(f"Measured (corrected, signed): **{res['measured_ps_raw']:.3f} ps**")
+        st.write(f"|delay| used for decision: **{res['measured_ps_abs']:.3f} ps**")
+        st.write(f"|delay| - target = **{res['diff_ps']:.3f} ps**")
+        st.write(f"Late (longer): **{res['late_side']}** / Early (shorter): **{res['early_side']}**")
+
+        if res["cut_side"] is None:
+            st.success(res["note"])
+        else:
+            st.success(f"CUT **{res['cut_side']}** by **{res['delta_mm']:.3f} mm**")
+            st.info(res["note"])
+
+        if show_status_viz:
+            plot_status_band(res["measured_ps_abs"], target_ps, tol_ps)
+        if show_timing_viz:
+            plot_timing_diagram(res["delay_s_raw"] * 1e12, res["late_side"], res["early_side"])
     else:
-        st.success(f"CUT **{res['cut_side']}** by **{res['delta_mm']:.3f} mm**")
-        st.info(res["note"])
-
-    # Log
-    st.session_state.log.append({
-        "mode": "Manual",
-        "measured_ps_signed": float(res["measured_ps_raw"]),
-        "measured_ps_abs": float(res["measured_ps_abs"]),
-        "target_ps": float(target_ps),
-        "diff_ps": float(res["diff_ps"]),
-        "late_side": res["late_side"],
-        "cut_side": res["cut_side"] if res["cut_side"] is not None else "OK",
-        "delta_mm": float(res["delta_mm"]),
-        "note": res["note"],
-    })
+        st.info("Press **Compute (Manual)** to calculate. (Mode switching will not create history entries.)")
 
 # =====================================================
 # CSV Mode
@@ -255,18 +461,17 @@ if mode == "CSV":
         time_scale = {"s": 1.0, "ms": 1e-3, "us": 1e-6, "ns": 1e-9, "ps": 1e-12}[time_unit]
         late_rule = st.selectbox("Late side rule from lag sign", ["lag>0 => ch2 late", "lag>0 => ch1 late"], index=0)
     with colz:
-        show_plots = st.checkbox("Show plots", value=True)
-        show_roi_only = st.checkbox("Plot ROI only", value=True)
+        show_plots = st.checkbox("Show waveforms / correlation", value=True)
+        show_roi_only = st.checkbox("Use ROI for calc & plot", value=True)
+        run_csv = st.button("Quick Measure (CSV)", type="primary", disabled=(file is None))
 
-    if file is not None and st.button("Quick Measure", type="primary"):
+    if run_csv:
         try:
             df = pd.read_csv(file)
-
             if df.shape[1] < 3:
                 st.error("CSV must have at least 3 columns: time, ch1, ch2.")
                 st.stop()
 
-            # Use first 3 columns regardless of header names
             t = df.iloc[:, 0].to_numpy(dtype=float) * time_scale
             ch1 = df.iloc[:, 1].to_numpy(dtype=float)
             ch2 = df.iloc[:, 2].to_numpy(dtype=float)
@@ -275,38 +480,39 @@ if mode == "CSV":
                 ch1 = apply_filter(ch1, window=filter_window)
                 ch2 = apply_filter(ch2, window=filter_window)
 
-            # Determine ROI
+            # ROI indices (based on filtered signals)
             s1, e1 = find_roi_indices(ch1, threshold=threshold, margin=int(margin))
             s2, e2 = find_roi_indices(ch2, threshold=threshold, margin=int(margin))
             start, end = min(s1, s2), max(e1, e2)
 
             if show_roi_only:
-                t_roi, ch1_roi, ch2_roi = t[start:end], ch1[start:end], ch2[start:end]
+                t_use, ch1_use, ch2_use = t[start:end], ch1[start:end], ch2[start:end]
             else:
-                t_roi, ch1_roi, ch2_roi = t, ch1, ch2
+                t_use, ch1_use, ch2_use = t, ch1, ch2
 
-            # Safety checks
-            if len(t_roi) < 2:
+            # Safety
+            if len(t_use) < 2:
                 st.error("ROI too short (<2 samples). Lower threshold or increase margin.")
                 st.stop()
 
-            dt = float(t_roi[1] - t_roi[0])
+            dt = float(t_use[1] - t_use[0])
             if not np.isfinite(dt) or dt <= 0:
                 st.error("Invalid time axis (dt <= 0). Check time column and unit.")
                 st.stop()
 
-            ch1n = safe_standardize(ch1_roi)
-            ch2n = safe_standardize(ch2_roi)
+            ch1n = safe_standardize(ch1_use)
+            ch2n = safe_standardize(ch2_use)
             if ch1n is None or ch2n is None:
                 st.error("Signal std is zero/invalid -> cannot compute correlation. Check data.")
                 st.stop()
 
-            # Cross-correlation
+            N = len(ch1n)
             corr = np.correlate(ch1n, ch2n, mode="full")
             idx = int(np.argmax(corr))
             idx_ref = refine_peak_parabolic(corr, idx)
-            lag = float(idx_ref - (len(ch1n) - 1))  # samples (can be fractional)
+            lag = float(idx_ref - (N - 1))  # samples (fractional)
             delay_s_raw = lag * dt
+            delay_ps_raw = delay_s_raw * 1e12
 
             # late side decision from lag sign
             if late_rule == "lag>0 => ch2 late":
@@ -315,11 +521,13 @@ if mode == "CSV":
                 late_side = "ch1" if lag > 0 else "ch2"
 
             res = cut_only_decision_abs_target(delay_s_raw, late_side)
+            res["mode"] = "CSV"
+            st.session_state.last_result = res  # keep last
 
             # Results
             st.subheader("Result")
             st.write(f"Lag (samples): **{lag:.3f}**")
-            st.write(f"dt: **{dt:.3e} s**  -> raw delay: **{delay_s_raw*1e12:.3f} ps**")
+            st.write(f"dt: **{dt:.3e} s**  -> raw delay: **{delay_ps_raw:.3f} ps**")
             st.write(f"Measured (corrected, signed): **{res['measured_ps_raw']:.3f} ps**")
             st.write(f"|delay|: **{res['measured_ps_abs']:.3f} ps**")
             st.write(f"|delay| - target = **{res['diff_ps']:.3f} ps**")
@@ -331,33 +539,33 @@ if mode == "CSV":
                 st.success(f"CUT **{res['cut_side']}** by **{res['delta_mm']:.3f} mm**")
                 st.info(res["note"])
 
-            # Plots
+            # Visualizations
+            if show_status_viz:
+                plot_status_band(res["measured_ps_abs"], target_ps, tol_ps)
+            if show_timing_viz:
+                plot_timing_diagram(delay_ps_raw, res["late_side"], res["early_side"])
+
             if show_plots:
                 st.subheader("Plots")
                 plot_waveforms(
-                    t_roi, ch1_roi, ch2_roi,
+                    t_use, ch1_use, ch2_use,
                     title=("Waveforms (ROI)" if show_roi_only else "Waveforms (Full)"),
                     time_unit=time_unit
                 )
-                plot_correlation(corr, lag_samples=lag, title="Cross-correlation (peak = estimated lag)")
+                plot_correlation(corr, lag_samples=lag, N=N)
 
-            # Log
-            st.session_state.log.append({
-                "mode": "CSV",
-                "lag_samples": float(lag),
-                "dt_s": float(dt),
-                "measured_ps_signed": float(res["measured_ps_raw"]),
-                "measured_ps_abs": float(res["measured_ps_abs"]),
-                "target_ps": float(target_ps),
-                "diff_ps": float(res["diff_ps"]),
-                "late_side": res["late_side"],
-                "cut_side": res["cut_side"] if res["cut_side"] is not None else "OK",
-                "delta_mm": float(res["delta_mm"]),
-                "note": res["note"],
-                "roi_start": int(start),
-                "roi_end": int(end),
-                "time_unit": time_unit,
-            })
+            # History: append ONLY on button press and OK gated
+            if log_only_when_button:
+                append_history(res, extra={
+                    "lag_samples": float(lag),
+                    "dt_s": float(dt),
+                    "raw_delay_ps": float(delay_ps_raw),
+                    "roi_start": int(start),
+                    "roi_end": int(end),
+                    "time_unit": time_unit,
+                })
+            else:
+                append_history(res)
 
         except Exception as e:
             st.exception(e)
@@ -369,12 +577,11 @@ st.divider()
 st.subheader("History")
 
 if len(st.session_state.log) == 0:
-    st.info("No history yet.")
+    st.info("No history yet. (OK entries are not recorded by default.)")
 else:
     log_df = pd.DataFrame(st.session_state.log)
     st.dataframe(log_df, use_container_width=True)
 
-    # Download
     csv_bytes = log_df.to_csv(index=False).encode("utf-8")
     st.download_button(
         "Download history as CSV",
