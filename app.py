@@ -8,77 +8,6 @@ c = 299792458  # m/s
 # -------------------------
 # Page
 # -------------------------
-st.set_page_config(page_title="Fiber Delay Adjustment Tool", layout="wide")
-st.title("Fiber Delay Adjustment Tool - FINAL (Cut-only / Abs / Late-side)")
-
-# =========================
-# Inputs
-# =========================
-colA, colB, colC = st.columns(3)
-with colA:
-    target_ps = st.number_input("Target delay (ps)", value=500.0, step=1.0)
-    tol_ps = st.number_input("Tolerance (ps)", value=1.0, step=0.1)
-with colB:
-    wavelength = st.number_input("Wavelength (nm)", value=1550.0, step=1.0)
-    pm_factor = st.number_input("PM correction factor", value=1.0, step=0.001, format="%.6f")
-with colC:
-    use_filter = st.checkbox("Enable filtering (moving average)", value=True)
-    use_temp = st.checkbox("Temperature correction")
-    delta_T = st.number_input("ΔT (°C)", value=0.0, step=0.1)
-
-st.divider()
-
-# Operation policy
-st.subheader("Operation policy")
-p1, p2, p3 = st.columns(3)
-with p1:
-    abs_mode = st.checkbox("Use |delay| for target comparison (ABS mode)", value=True)
-with p2:
-    cut_only = st.checkbox("Cut-only policy (never suggest Add)", value=True)
-with p3:
-    # Because correlation sign can flip depending on definition, we provide a switch.
-    lag_sign = st.radio(
-        "Lag sign interpretation",
-        ["lag>0 means ch2 is later", "lag>0 means ch1 is later"],
-        index=0
-    )
-invert_lag = st.checkbox("Invert lag sign (if your sign appears reversed)", value=False)
-
-st.caption(
-    "Tip: If the tool says the wrong channel is 'late', toggle 'Invert lag sign' or switch the 'Lag sign interpretation'."
-)
-
-mode = st.radio("Mode", ["Manual input", "CSV"], horizontal=True)
-
-# =========================
-# session state
-# =========================
-if "log" not in st.session_state:
-    st.session_state.log = []
-
-# =========================
-# Functions
-# =========================
-def ng_dispersion(lambda_nm: float) -> float:
-    """Simple group index approximation"""
-    return 1.468 + 1e-5 * (lambda_nm - 1550.0)
-
-def apply_filter(signal: np.ndarray, window: int = 7) -> np.ndarray:
----
-
-> **そのまま `app.py` に貼ってOK**（`&gt;`等なし・バッククォートなし）
-
-```python
-import streamlit as st
-import numpy as np
-import pandas as pd
-import plotly.graph_objects as go
-
-c = 299792458  # m/s
-
-# -------------------------
-# Page
-# -------------------------
 st.set_page_config(page_title="Fiber Delay Adjustment Tool (Cut-Only)", layout="wide")
 st.title("Fiber Delay Adjustment Tool - CUT-ONLY FINAL")
 
@@ -238,12 +167,11 @@ def corrected_delay_s(delay_s_raw: float) -> float:
 
 def cut_only_decision(delay_s_raw: float, late_side: str):
     """
-    Implements the policy:
+    Policy:
       - Compare by |delay|
       - If |delay| > target+tol => CUT late side by ΔL = (|delay|-target) * c / ng
       - If |delay| within tol => OK
-      - If |delay| < target-tol => cannot fix by cutting => WARNING (needs add/rebuild)
-    Returns dict with fields for UI/log.
+      - If |delay| < target-tol => cannot fix by cutting => WARNING
     """
     ng = ng_dispersion(wavelength)
 
@@ -421,3 +349,4 @@ if len(log_df) > 0:
         file_name="fiber_delay_log.csv",
         mime="text/csv"
     )
+``
