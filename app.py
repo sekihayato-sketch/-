@@ -66,8 +66,6 @@ def ng_dispersion(lambda_nm: float) -> float:
 def apply_filter(signal: np.ndarray, window: int = 7) -> np.ndarray:
 ---
 
-# ✅ 完全版コード（Cut-Only / |delay|評価 / どっちを切るか表示）
-
 > **そのまま `app.py` に貼ってOK**（`&gt;`等なし・バッククォートなし）
 
 ```python
