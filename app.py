@@ -201,62 +201,110 @@ def plot_status_band_with_action(measured_abs_ps: float, target_ps: float, tol_p
 # =====================================================
 def plot_timing_diagram_signed(delay_ps_signed: float, late_side: str, early_side: str):
     """
-    Draw timing with consistent definition:
-      delay_ps_signed = t(ch2) - t(ch1)
-      ch1 event at 0
-      ch2 event at delay_ps_signed
+    delay_ps_signed = t(ch2) - t(ch1)
+      + -> ch2 later
+      - -> ch1 later
     """
     t_ch1 = 0.0
     t_ch2 = float(delay_ps_signed)
 
-    span = max(abs(t_ch2), 5.0) * 1.6
+    # axis span
+    span = max(abs(t_ch2), 50.0) * 1.3
     xmin, xmax = -span, span
 
     fig = go.Figure()
 
-    # baselines (fixed: ch1 on top, ch2 on bottom)
-    fig.add_trace(go.Scatter(x=[xmin, xmax], y=[1, 1], mode="lines",
-                             line=dict(color="rgba(80,80,80,0.5)", width=5),
-                             showlegend=False, hoverinfo="skip"))
-    fig.add_trace(go.Scatter(x=[xmin, xmax], y=[0, 0], mode="lines",
-                             line=dict(color="rgba(80,80,80,0.5)", width=5),
-                             showlegend=False, hoverinfo="skip"))
+    # Baselines
+    fig.add_trace(go.Scatter(
+        x=[xmin, xmax], y=[1, 1],
+        mode="lines", line=dict(color="rgba(120,120,120,0.7)", width=6),
+        showlegend=False, hoverinfo="skip"
+    ))
+    fig.add_trace(go.Scatter(
+        x=[xmin, xmax], y=[0, 0],
+        mode="lines", line=dict(color="rgba(120,120,120,0.7)", width=6),
+        showlegend=False, hoverinfo="skip"
+    ))
 
-    # markers
-    fig.add_trace(go.Scatter(x=[t_ch1], y=[1], mode="markers+text",
-                             marker=dict(size=14, color="#444", line=dict(color="black", width=1)),
-                             text=["ch1"], textposition="top center", showlegend=False))
-    fig.add_trace(go.Scatter(x=[t_ch2], y=[0], mode="markers+text",
-                             marker=dict(size=14, color="#444", line=dict(color="black", width=1)),
-                             text=["ch2"], textposition="bottom center", showlegend=False))
+    # Vertical reference lines at events
+    fig.add_vline(x=t_ch1, line_width=1, line_dash="dot", line_color="rgba(0,0,0,0.35)")
+    fig.add_vline(x=t_ch2, line_width=1, line_dash="dot", line_color="rgba(0,0,0,0.35)")
 
-    # arrow from ch1 to ch2 (shows sign/direction)
+    # Event markers
+    fig.add_trace(go.Scatter(
+        x=[t_ch1], y=[1],
+        mode="markers+text",
+        marker=dict(size=16, color="#333", line=dict(color="black", width=1)),
+        text=["ch1"], textposition="top center",
+        showlegend=False
+    ))
+    fig.add_trace(go.Scatter(
+        x=[t_ch2], y=[0],
+        mode="markers+text",
+        marker=dict(size=16, color="#333", line=dict(color="black", width=1)),
+        text=["ch2"], textposition="bottom center",
+        showlegend=False
+    ))
+
+    # Horizontal delta arrow (center line)
+    mid_y = 0.5
     fig.add_annotation(
-        x=t_ch2, y=0.05,
-        ax=t_ch1, ay=0.95,
+        x=t_ch2, y=mid_y,
+        ax=t_ch1, ay=mid_y,
         xref="x", yref="y", axref="x", ayref="y",
-        text=f"signed delay = {t_ch2:.3f} ps (ch2 - ch1)",
+        text=f"Δt = {t_ch2 - t_ch1:.3f} ps (ch2 - ch1)",
         showarrow=True,
-        arrowhead=3, arrowsize=1.1, arrowwidth=2,
-        arrowcolor="rgba(0,0,0,0.85)"
+        arrowhead=3,
+        arrowsize=1.1,
+        arrowwidth=2,
+        arrowcolor="rgba(0,0,0,0.85)",
+        bgcolor="rgba(255,255,255,0.85)",
+        bordercolor="rgba(0,0,0,0.2)",
+        borderwidth=1
     )
 
-    # late/early labels (derived from sign)
-    fig.add_annotation(x=xmax*0.98, y=0.92, xref="x", yref="y",
-                       text=f"Late (longer): <b>{late_side}</b>",
-                       showarrow=False, xanchor="right")
-    fig.add_annotation(x=xmax*0.98, y=0.08, xref="x", yref="y",
-                       text=f"Early (shorter): <b>{early_side}</b>",
-                       showarrow=False, xanchor="right")
+    # Late/Early labels placed near the corresponding marker (NOT at right edge)
+    # Put label slightly to the right of each marker with a small y offset
+    fig.add_annotation(
+        x=t_ch1, y=1.15, xref="x", yref="y",
+        text=("Late: <b>ch1</b>" if late_side == "ch1" else "Early: <b>ch1</b>"),
+        showarrow=False,
+        bgcolor="rgba(255,255,255,0.85)",
+        bordercolor="rgba(0,0,0,0.15)",
+        borderwidth=1
+    )
+    fig.add_annotation(
+        x=t_ch2, y=-0.15, xref="x", yref="y",
+        text=("Late: <b>ch2</b>" if late_side == "ch2" else "Early: <b>ch2</b>"),
+        showarrow=False,
+        bgcolor="rgba(255,255,255,0.85)",
+        bordercolor="rgba(0,0,0,0.15)",
+        borderwidth=1
+    )
+
+    # Also show summary in a fixed place (paper coords) so it never overlaps data
+    fig.add_annotation(
+        x=0.99, y=0.98, xref="paper", yref="paper",
+        text=f"Late (longer): <b>{late_side}</b> / Early (shorter): <b>{early_side}</b>",
+        showarrow=False,
+        xanchor="right",
+        bgcolor="rgba(255,255,255,0.85)",
+        bordercolor="rgba(0,0,0,0.15)",
+        borderwidth=1
+    )
 
     fig.update_layout(
-        title="Timing diagram (must match manual signed delay)",
+        title="Timing diagram (manual signed delay, readable)",
         xaxis_title="time (ps)",
-        yaxis=dict(tickmode="array", tickvals=[1, 0], ticktext=["ch1", "ch2"],
-                   range=[-0.4, 1.4]),
+        yaxis=dict(
+            tickmode="array",
+            tickvals=[1, 0],
+            ticktext=["ch1", "ch2"],
+            range=[-0.5, 1.5]
+        ),
         xaxis=dict(range=[xmin, xmax], zeroline=True, zerolinewidth=1),
-        height=320,
-        margin=dict(l=10, r=10, t=45, b=10),
+        height=340,
+        margin=dict(l=10, r=10, t=50, b=10),
         showlegend=False
     )
 
