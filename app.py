@@ -63,17 +63,7 @@ def ng_dispersion(lambda_nm: float) -> float:
     """Simple group index approximation"""
     return 1.468 + 1e-5 * (lambda_nm - 1550.0)
 
-def apply_filter(signal: np.ndarray, window: int = 7)了解。**「遅れている方（＝長い方）を短くする＝切る」**を基本方針にして、  
-さらに **符号に依存せず |delay| で評価**できる **“現場向け完全版（Cut-Only Policy付き）”**を出します。
-
-ポイントはこうです：
-
-- **遅延の評価は |delay|**（符号は“どっちが遅いか判定”にだけ使う）
-- **原則 CUT のみ**  
-  - もし `|delay| < target` なら「切っても目標に近づけられない」ので、**Cut-onlyでは“調整不可（要再施工/追加）”として警告**にする  
-- 従来どおり **長さ換算は ΔL = Δτ * c / n_g** を使う（元の実装の考え方に合わせています）[1](https://outlook.office365.com/owa/?ItemID=AAMkAGMwMDNmN2VjLTdkY2EtNDVlYS1hNDc5LTY5ODAzZDRkZWQxYQBGAAAAAADCS6uxe3nSSbXxoA8cBI4tBwDrChiRh2ZZTpRCENkpeZiQAAAAAAEMAADrChiRh2ZZTpRCENkpeZiQAAJxxTXwAAA%3d&exvsurl=1&viewmodel=ReadMessageItem)
-- オシロCSVの **time単位（s/ns/ps…）を選べる**ようにして事故防止
-
+def apply_filter(signal: np.ndarray, window: int = 7) -> np.ndarray:
 ---
 
 # ✅ 完全版コード（Cut-Only / |delay|評価 / どっちを切るか表示）
@@ -433,4 +423,3 @@ if len(log_df) > 0:
         file_name="fiber_delay_log.csv",
         mime="text/csv"
     )
-``
