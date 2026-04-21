@@ -9,145 +9,193 @@ c = 299792458  # m/s
 # Page
 # -------------------------
 st.set_page_config(page_title="Fiber Delay Adjustment Tool", layout="wide")
-st.title("Fiber Delay Adjustment Tool - FINAL (Fixed)")
+st.title("Fiber Delay Adjustment Tool - FINAL (Cut-only / Abs / Late-side)")
 
 # =========================
-# 入力
+# Inputs
 # =========================
-target_ps = st.number_input("Target delay (ps)", value=500.0)
-wavelength = st.number_input("Wavelength (nm)", value=1550.0)
+colA, colB, colC = st.columns(3)
+with colA:
+    target_ps = st.number_input("Target delay (ps)", value=500.0, step=1.0)
+    tol_ps = st.number_input("Tolerance (ps)", value=1.0, step=0.1)
+with colB:
+    wavelength = st.number_input("Wavelength (nm)", value=1550.0, step=1.0)
+    pm_factor = st.number_input("PM correction factor", value=1.0, step=0.001, format="%.6f")
+with colC:
+    use_filter = st.checkbox("Enable filtering (moving average)", value=True)
+    use_temp = st.checkbox("Temperature correction")
+    delta_T = st.number_input("ΔT (°C)", value=0.0, step=0.1)
 
-use_filter = st.checkbox("Enable filtering", value=True)
-use_temp = st.checkbox("Temperature correction")
-delta_T = st.number_input("ΔT (°C)", value=0.0)
+st.divider()
 
-pm_factor = st.number_input("PM correction factor", value=1.0)
+# Operation policy
+st.subheader("Operation policy")
+p1, p2, p3 = st.columns(3)
+with p1:
+    abs_mode = st.checkbox("Use |delay| for target comparison (ABS mode)", value=True)
+with p2:
+    cut_only = st.checkbox("Cut-only policy (never suggest Add)", value=True)
+with p3:
+    # Because correlation sign can flip depending on definition, we provide a switch.
+    lag_sign = st.radio(
+        "Lag sign interpretation",
+        ["lag>0 means ch2 is later", "lag>0 means ch1 is later"],
+        index=0
+    )
+invert_lag = st.checkbox("Invert lag sign (if your sign appears reversed)", value=False)
+
+st.caption(
+    "Tip: If the tool says the wrong channel is 'late', toggle 'Invert lag sign' or switch the 'Lag sign interpretation'."
+)
 
 mode = st.radio("Mode", ["Manual input", "CSV"], horizontal=True)
 
 # =========================
-# 状態保存
+# session state
 # =========================
 if "log" not in st.session_state:
     st.session_state.log = []
 
 # =========================
-# 関数
+# Functions
 # =========================
 def ng_dispersion(lambda_nm: float) -> float:
-    """群屈折率の簡易近似（必要ならここを置き換え）"""
+    """Simple group index approximation"""
     return 1.468 + 1e-5 * (lambda_nm - 1550.0)
 
+def apply_filter(signal: np.ndarray, window: int = 7)了解。**「遅れている方（＝長い方）を短くする＝切る」**を基本方針にして、  
+さらに **符号に依存せず |delay| で評価**できる **“現場向け完全版（Cut-Only Policy付き）”**を出します。
+
+ポイントはこうです：
+
+- **遅延の評価は |delay|**（符号は“どっちが遅いか判定”にだけ使う）
+- **原則 CUT のみ**  
+  - もし `|delay| < target` なら「切っても目標に近づけられない」ので、**Cut-onlyでは“調整不可（要再施工/追加）”として警告**にする  
+- 従来どおり **長さ換算は ΔL = Δτ * c / n_g** を使う（元の実装の考え方に合わせています）[1](https://outlook.office365.com/owa/?ItemID=AAMkAGMwMDNmN2VjLTdkY2EtNDVlYS1hNDc5LTY5ODAzZDRkZWQxYQBGAAAAAADCS6uxe3nSSbXxoA8cBI4tBwDrChiRh2ZZTpRCENkpeZiQAAAAAAEMAADrChiRh2ZZTpRCENkpeZiQAAJxxTXwAAA%3d&exvsurl=1&viewmodel=ReadMessageItem)
+- オシロCSVの **time単位（s/ns/ps…）を選べる**ようにして事故防止
+
+---
+
+# ✅ 完全版コード（Cut-Only / |delay|評価 / どっちを切るか表示）
+
+> **そのまま `app.py` に貼ってOK**（`&gt;`等なし・バッククォートなし）
+
+```python
+import streamlit as st
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+
+c = 299792458  # m/s
+
+# -------------------------
+# Page
+# -------------------------
+st.set_page_config(page_title="Fiber Delay Adjustment Tool (Cut-Only)", layout="wide")
+st.title("Fiber Delay Adjustment Tool - CUT-ONLY FINAL")
+
+# =========================
+# Inputs
+# =========================
+colA, colB, colC = st.columns(3)
+with colA:
+    target_ps = st.number_input("Target delay |Δt| (ps)", value=500.0)
+    tol_ps = st.number_input("Tolerance (ps)", value=1.0)
+with colB:
+    wavelength = st.number_input("Wavelength (nm)", value=1550.0)
+    pm_factor = st.number_input("PM correction factor", value=1.0)
+with colC:
+    use_temp = st.checkbox("Temperature correction")
+    delta_T = st.number_input("ΔT (°C)", value=0.0)
+    use_filter = st.checkbox("Enable filtering", value=True)
+
+st.divider()
+
+mode = st.radio("Mode", ["Manual input", "CSV"], horizontal=True)
+
+# =========================
+# State
+# =========================
+if "log" not in st.session_state:
+    st.session_state.log = []
+
+# =========================
+# Helpers
+# =========================
+def ng_dispersion(lambda_nm: float) -> float:
+    # Simple approximation (replace if you have a better model)
+    return 1.468 + 1e-5 * (lambda_nm - 1550.0)
+
+def temp_corr(delay_s: float, dT: float) -> float:
+    # 40 ps/km/K proportional model
+    return delay_s * (1.0 + (40e-12 / 1000.0) * dT)
+
 def apply_filter(signal: np.ndarray, window: int = 7) -> np.ndarray:
-    """移動平均フィルタ"""
     window = max(1, int(window))
     if window == 1:
         return signal
     kernel = np.ones(window) / window
     return np.convolve(signal, kernel, mode="same")
 
-def find_roi_indices(signal: np.ndarray, threshold: float = 0.3, margin: int = 50):
-    """
-    パルスらしい領域(ROI)のインデックス範囲を返す。
-    threshold: |x|/max(|x|) が threshold を超える領域
-    margin: ROIの前後に余白を付ける
-    """
-    if signal is None or len(signal) == 0:
-        return 0, 0
-
-    abs_sig = np.abs(signal)
-    mx = np.max(abs_sig)
-    if mx == 0:
-        return 0, len(signal)
-
-    norm = abs_sig / mx
-    idx = np.where(norm > threshold)[0]
-    if len(idx) == 0:
-        return 0, len(signal)
-
-    start = max(int(idx[0]) - margin, 0)
-    end = min(int(idx[-1]) + margin + 1, len(signal))
-    return start, end
-
-def refine_peak_parabolic(y: np.ndarray, idx: int) -> float:
-    """
-    相関のピークを2次近似でサブサンプル推定
-    """
-    if idx <= 0 or idx >= len(y) - 1:
-        return float(idx)
-
-    y1, y2, y3 = y[idx - 1], y[idx], y[idx + 1]
-    denom = (y1 - 2.0 * y2 + y3)
-    if denom == 0:
-        return float(idx)
-
-    return float(idx) + 0.5 * (y1 - y3) / denom
-
-def temp_corr(delay_s: float, dT: float) -> float:
-    """
-    温度補正（40 ps/km/K を delay_s に比例補正として適用）
-    ※モデルは必要に応じて置き換え
-    """
-    return delay_s * (1.0 + (40e-12 / 1000.0) * dT)
-
-def calc_all(delay_s: float, wavelength_nm: float) -> tuple[float, float, float]:
-    """
-    delay_s: 測定遅延 [s]
-    return: (error_ps, delta_L[m], corrected_delay_s)
-    """
-    ng = ng_dispersion(wavelength_nm)
-
-    if use_temp:
-        delay_s = temp_corr(delay_s, delta_T)
-
-    delay_s *= pm_factor
-
-    target_s = target_ps * 1e-12
-    error_s = delay_s - target_s
-    error_ps = error_s * 1e12
-
-    # 誤差を打ち消すための長さ修正
-    delta_L = -error_s * c / ng
-
-    return error_ps, delta_L, delay_s
-
 def safe_standardize(x: np.ndarray):
-    """平均0・分散1。std=0の場合は None を返して止める"""
     x = np.asarray(x)
     s = np.std(x)
     if s == 0 or not np.isfinite(s):
         return None
     return (x - np.mean(x)) / s
 
-def compute_delay_from_csv(df: pd.DataFrame, threshold: float = 0.3):
+def find_roi_indices(signal: np.ndarray, threshold: float = 0.3, margin: int = 80):
+    if signal is None or len(signal) == 0:
+        return 0, 0
+    abs_sig = np.abs(signal)
+    mx = np.max(abs_sig)
+    if mx == 0:
+        return 0, len(signal)
+    norm = abs_sig / mx
+    idx = np.where(norm > threshold)[0]
+    if len(idx) == 0:
+        return 0, len(signal)
+    start = max(int(idx[0]) - margin, 0)
+    end = min(int(idx[-1]) + margin + 1, len(signal))
+    return start, end
+
+def refine_peak_parabolic(y: np.ndarray, idx: int) -> float:
+    if idx <= 0 or idx >= len(y) - 1:
+        return float(idx)
+    y1, y2, y3 = y[idx - 1], y[idx], y[idx + 1]
+    denom = (y1 - 2.0 * y2 + y3)
+    if denom == 0:
+        return float(idx)
+    return float(idx) + 0.5 * (y1 - y3) / denom
+
+def compute_delay_from_csv(df: pd.DataFrame, threshold: float, time_scale: float, invert_late_rule: bool):
     """
-    CSVから遅延推定（相互相関）
-    戻り値:
-      t, ch1, ch2, corr, lags, lag_float, delay_s, confidence
+    Returns:
+      t, ch1n, ch2n, corr, lags, lag_float, delay_s_raw, confidence, late_side
     """
     if df.shape[1] < 3:
         raise ValueError("CSV must have at least 3 columns: time, ch1, ch2")
 
-    t = df.iloc[:, 0].to_numpy(dtype=float)
+    t = df.iloc[:, 0].to_numpy(dtype=float) * time_scale
     ch1 = df.iloc[:, 1].to_numpy(dtype=float)
     ch2 = df.iloc[:, 2].to_numpy(dtype=float)
 
-    # NaN除去（行単位で）
+    # Remove NaNs row-wise
     mask = np.isfinite(t) & np.isfinite(ch1) & np.isfinite(ch2)
     t, ch1, ch2 = t[mask], ch1[mask], ch2[mask]
     if len(t) < 3:
         raise ValueError("Not enough valid samples after removing NaNs.")
 
-    # 単調増加チェック（オシロの時間軸前提）
+    # Time must increase
     if not np.all(np.diff(t) > 0):
-        raise ValueError("Time column must be strictly increasing.")
+        raise ValueError("Time column must be strictly increasing (after unit scaling).")
 
-    # フィルタ
+    # Optional filter
     if use_filter:
         ch1 = apply_filter(ch1, window=7)
         ch2 = apply_filter(ch2, window=7)
 
-    # ROI（ch1/ch2それぞれ）→ union を使って t も同じ範囲で切る（重要）
+    # ROI union to keep t aligned
     s1, e1 = find_roi_indices(ch1, threshold=threshold, margin=80)
     s2, e2 = find_roi_indices(ch2, threshold=threshold, margin=80)
     start = min(s1, s2)
@@ -158,153 +206,222 @@ def compute_delay_from_csv(df: pd.DataFrame, threshold: float = 0.3):
     ch2 = ch2[start:end]
 
     if len(t) < 3:
-        raise ValueError("ROI is too small. Try lowering threshold or check waveform.")
+        raise ValueError("ROI too small. Lower threshold or check waveform.")
 
     dt = t[1] - t[0]
     if dt <= 0:
-        raise ValueError("Invalid dt computed from time vector.")
+        raise ValueError("Invalid dt from time vector.")
 
-    # 標準化（std=0対策）
+    # Standardize
     ch1n = safe_standardize(ch1)
     ch2n = safe_standardize(ch2)
     if ch1n is None or ch2n is None:
-        raise ValueError("Signal std is zero (flat). Check CSV columns / scaling.")
+        raise ValueError("Signal std is zero (flat). Check CSV columns/scaling.")
 
-    # 相互相関
+    # Cross-correlation
     corr = np.correlate(ch1n, ch2n, mode="full")
     idx = int(np.argmax(corr))
     idx_ref = refine_peak_parabolic(corr, idx)
 
-    lag_float = idx_ref - (len(ch1n) - 1)  # サンプル数のずれ
-    delay_s = lag_float * dt
+    lag_float = idx_ref - (len(ch1n) - 1)  # lag in samples
+    delay_s_raw = lag_float * dt
 
-    # 信頼度（ざっくり）
+    # Confidence
     peak = float(np.max(corr))
     noise = float(np.mean(np.abs(corr))) + 1e-12
     confidence = peak / noise
 
     lags = np.arange(-len(ch1n) + 1, len(ch1n), dtype=float)
 
-    return t, ch1n, ch2n, corr, lags, lag_float, delay_s, confidence
+    # Determine which side is "late" (needs to be shortened)
+    # Default rule: lag_float > 0 => ch2 is late; else ch1 is late
+    late_side = "ch2" if lag_float > 0 else "ch1"
+    if invert_late_rule:
+        late_side = "ch1" if late_side == "ch2" else "ch2"
+
+    return t, ch1n, ch2n, corr, lags, lag_float, delay_s_raw, confidence, late_side
+
+def corrected_delay_s(delay_s_raw: float) -> float:
+    delay_s = delay_s_raw
+    if use_temp:
+        delay_s = temp_corr(delay_s, delta_T)
+    delay_s *= pm_factor
+    return delay_s
+
+def cut_only_decision(delay_s_raw: float, late_side: str):
+    """
+    Implements the policy:
+      - Compare by |delay|
+      - If |delay| > target+tol => CUT late side by ΔL = (|delay|-target) * c / ng
+      - If |delay| within tol => OK
+      - If |delay| < target-tol => cannot fix by cutting => WARNING (needs add/rebuild)
+    Returns dict with fields for UI/log.
+    """
+    ng = ng_dispersion(wavelength)
+
+    delay_corr = corrected_delay_s(delay_s_raw)
+    measured_ps_raw = delay_corr * 1e12
+    measured_ps_abs = abs(measured_ps_raw)
+
+    diff_ps = measured_ps_abs - target_ps  # positive means "too long"
+    within = abs(diff_ps) <= tol_ps
+
+    result = {
+        "measured_ps_raw": measured_ps_raw,
+        "measured_ps_abs": measured_ps_abs,
+        "diff_ps_abs_minus_target": diff_ps,
+        "late_side": late_side,
+        "action": None,
+        "delta_mm": 0.0,
+        "note": ""
+    }
+
+    if within:
+        result["action"] = "OK"
+        result["note"] = f"Within ±{tol_ps} ps"
+        return result
+
+    if diff_ps > tol_ps:
+        # Need LESS delay => CUT the late side
+        delta_tau_s = diff_ps * 1e-12
+        delta_L_m = (delta_tau_s * c) / ng
+        result["action"] = "CUT"
+        result["delta_mm"] = delta_L_m * 1000.0
+        result["note"] = "Too long -> cut late side"
+        return result
+
+    # diff_ps < -tol_ps => too short, cannot fix by cutting
+    result["action"] = "TOO_SHORT"
+    result["note"] = "Too short -> cannot fix by cutting. Need add fiber or rebuild baseline."
+    return result
 
 # =========================
-# 手入力モード
+# Manual Mode
 # =========================
 if mode == "Manual input":
-    measured_ps = st.number_input("Measured delay (ps)", value=500.0)
-    delay_s = measured_ps * 1e-12
+    st.subheader("Manual input (Cut-only logic)")
+    col1, col2 = st.columns(2)
+    with col1:
+        measured_ps_input = st.number_input("Measured delay (ps) (can be ±)", value=500.0)
+    with col2:
+        late_side_manual = st.radio("Late side (to shorten)", ["ch1", "ch2"], horizontal=True)
 
-    error_ps, delta_L, corrected_delay_s = calc_all(delay_s, wavelength)
+    delay_s_raw = measured_ps_input * 1e-12
+    res = cut_only_decision(delay_s_raw, late_side_manual)
 
     st.subheader("Result")
-    st.write(f"Measured (raw): {delay_s*1e12:.3f} ps")
-    st.write(f"Measured (corrected): {corrected_delay_s*1e12:.3f} ps")
+    st.write(f"Measured (raw, corrected): {res['measured_ps_raw']:.3f} ps")
+    st.write(f"Measured |.| used for decision: {res['measured_ps_abs']:.3f} ps")
+    st.write(f"Late side: {res['late_side']}")
+    st.write(f"|delay|-target = {res['diff_ps_abs_minus_target']:.3f} ps")
 
-    if abs(error_ps) <= 1:
-        st.success(f"OK (±1 ps)  error={error_ps:.3f} ps")
+    if res["action"] == "OK":
+        st.success(res["note"])
+    elif res["action"] == "CUT":
+        st.success(f"CUT {res['late_side']} by {res['delta_mm']:.3f} mm  ({res['note']})")
     else:
-        st.warning(f"Error={error_ps:.3f} ps")
-        if delta_L > 0:
-            st.success(f"Add {delta_L*1000:.3f} mm")
-        else:
-            st.error(f"Cut {abs(delta_L*1000):.3f} mm")
+        st.warning(res["note"])
 
 # =========================
-# CSVモード
+# CSV Mode
 # =========================
 if mode == "CSV":
+    st.subheader("CSV mode (Cross-correlation + Cut-only)")
     file = st.file_uploader("Upload CSV (time, ch1, ch2)", type=["csv"])
-    threshold = st.slider("Auto-window threshold", 0.05, 0.90, 0.30, 0.05)
 
-    if file is not None:
-        if st.button("Quick Measure", type="primary"):
-            try:
-                df = pd.read_csv(file)
+    colx, coly, colz = st.columns(3)
+    with colx:
+        threshold = st.slider("Auto-window threshold", 0.05, 0.90, 0.30, 0.05)
+    with coly:
+        time_unit = st.selectbox("Time unit in CSV", ["s", "ms", "us", "ns", "ps"], index=0)
+        time_scale = {"s": 1.0, "ms": 1e-3, "us": 1e-6, "ns": 1e-9, "ps": 1e-12}[time_unit]
+    with colz:
+        invert_late_rule = st.checkbox("Invert late-side rule (if ch1/ch2 seems swapped)", value=False)
 
-                t, ch1n, ch2n, corr, lags, lag_float, delay_s, confidence = compute_delay_from_csv(
-                    df, threshold=threshold
-                )
+    if file is not None and st.button("Quick Measure", type="primary"):
+        try:
+            df = pd.read_csv(file)
 
-                error_ps, delta_L, corrected_delay_s = calc_all(delay_s, wavelength)
+            t, ch1n, ch2n, corr, lags, lag_float, delay_s_raw, confidence, late_side = compute_delay_from_csv(
+                df, threshold=threshold, time_scale=time_scale, invert_late_rule=invert_late_rule
+            )
 
-                # ログ保存
-                st.session_state.log.append({
-                    "measured_ps": corrected_delay_s * 1e12,
-                    "error_ps": error_ps,
-                    "delta_mm": delta_L * 1000.0,
-                    "confidence": confidence
-                })
+            res = cut_only_decision(delay_s_raw, late_side)
 
-                # =========================
-                # 結果表示
-                # =========================
-                st.subheader("Result")
-                st.write(f"Measured (raw): {delay_s*1e12:.3f} ps")
-                st.write(f"Measured (corrected): {corrected_delay_s*1e12:.3f} ps")
+            # Log
+            st.session_state.log.append({
+                "measured_ps_raw": res["measured_ps_raw"],
+                "measured_ps_abs": res["measured_ps_abs"],
+                "late_side": res["late_side"],
+                "action": res["action"],
+                "delta_mm": res["delta_mm"],
+                "confidence": confidence,
+                "lag_samples": lag_float,
+            })
 
-                # ゲージ
-                fig_gauge = go.Figure(go.Indicator(
-                    mode="gauge+number",
-                    value=error_ps,
-                    title={'text': "Error (ps)"},
-                    gauge={
-                        'axis': {'range': [-10, 10]},
-                        'steps': [
-                            {'range': [-1, 1], 'color': "green"},
-                            {'range': [-10, -1], 'color': "red"},
-                            {'range': [1, 10], 'color': "red"},
-                        ]
-                    }
-                ))
-                st.plotly_chart(fig_gauge, use_container_width=True)
+            # ---- Result display
+            st.subheader("Result")
+            st.write(f"Measured (raw, corrected): {res['measured_ps_raw']:.3f} ps")
+            st.write(f"Measured |.| used for decision: {res['measured_ps_abs']:.3f} ps")
+            st.write(f"Late side (to shorten): {res['late_side']}")
+            st.write(f"|delay|-target = {res['diff_ps_abs_minus_target']:.3f} ps")
+            st.write(f"Confidence: {confidence:.2f}")
+            st.write(f"Lag (samples): {lag_float:.3f}")
 
-                if abs(error_ps) <= 1:
-                    st.success("OK (±1 ps)")
-                else:
-                    if delta_L > 0:
-                        st.success(f"Add {delta_L*1000:.3f} mm")
-                    else:
-                        st.error(f"Cut {abs(delta_L*1000):.3f} mm")
+            # Gauge (shows diff)
+            fig_gauge = go.Figure(go.Indicator(
+                mode="gauge+number",
+                value=res["diff_ps_abs_minus_target"],
+                title={'text': "|delay| - target (ps)"},
+                gauge={
+                    'axis': {'range': [-10, 10]},
+                    'steps': [
+                        {'range': [-tol_ps, tol_ps], 'color': "green"},
+                        {'range': [-10, -tol_ps], 'color': "red"},
+                        {'range': [tol_ps, 10], 'color': "red"},
+                    ]
+                }
+            ))
+            st.plotly_chart(fig_gauge, use_container_width=True)
 
-                st.write(f"Confidence: {confidence:.2f}")
-                st.write(f"Lag (samples): {lag_float:.3f}")
+            if res["action"] == "OK":
+                st.success(res["note"])
+            elif res["action"] == "CUT":
+                st.success(f"CUT {res['late_side']} by {res['delta_mm']:.3f} mm  ({res['note']})")
+            else:
+                st.warning(res["note"])
 
-                # =========================
-                # 相関（ズーム）
-                # =========================
-                fig_corr = go.Figure()
-                fig_corr.add_trace(go.Scatter(x=lags, y=corr, name="corr"))
-                fig_corr.add_vline(x=lag_float, line_width=2, line_dash="dash", line_color="orange")
-                fig_corr.update_layout(title="Correlation", xaxis_title="Lag (samples)", yaxis_title="Corr")
-                st.plotly_chart(fig_corr, use_container_width=True)
+            # ---- Plots
+            st.subheader("Correlation")
+            fig_corr = go.Figure()
+            fig_corr.add_trace(go.Scatter(x=lags, y=corr, name="corr"))
+            fig_corr.add_vline(x=lag_float, line_width=2, line_dash="dash", line_color="orange")
+            fig_corr.update_layout(xaxis_title="Lag (samples)", yaxis_title="Correlation")
+            st.plotly_chart(fig_corr, use_container_width=True)
 
-                # =========================
-                # 波形（正規化後）
-                # =========================
-                fig_wave = go.Figure()
-                fig_wave.add_trace(go.Scatter(x=t, y=ch1n, name="ch1 (norm)"))
-                fig_wave.add_trace(go.Scatter(x=t, y=ch2n, name="ch2 (norm)"))
-                fig_wave.update_layout(title="Waveforms (Normalized)", xaxis_title="Time", yaxis_title="Amplitude")
-                st.plotly_chart(fig_wave, use_container_width=True)
+            st.subheader("Waveforms (normalized)")
+            fig_wave = go.Figure()
+            fig_wave.add_trace(go.Scatter(x=t, y=ch1n, name="ch1"))
+            fig_wave.add_trace(go.Scatter(x=t, y=ch2n, name="ch2"))
+            fig_wave.update_layout(xaxis_title="Time (scaled to seconds)", yaxis_title="Amplitude (norm)")
+            st.plotly_chart(fig_wave, use_container_width=True)
 
-                # =========================
-                # アライメント表示（整数シフト）
-                # =========================
-                shift = int(np.round(lag_float))
-                ch2_shift = np.roll(ch2n, -shift)
+            st.subheader("Aligned (integer shift preview)")
+            shift = int(np.round(lag_float))
+            ch2_shift = np.roll(ch2n, -shift)
+            fig_align = go.Figure()
+            fig_align.add_trace(go.Scatter(x=t, y=ch1n, name="ch1"))
+            fig_align.add_trace(go.Scatter(x=t, y=ch2_shift, name=f"ch2 aligned (shift={shift})"))
+            fig_align.update_layout(xaxis_title="Time (s)", yaxis_title="Amplitude (norm)")
+            st.plotly_chart(fig_align, use_container_width=True)
 
-                fig_align = go.Figure()
-                fig_align.add_trace(go.Scatter(x=t, y=ch1n, name="ch1"))
-                fig_align.add_trace(go.Scatter(x=t, y=ch2_shift, name=f"ch2 aligned (shift={shift})"))
-                fig_align.update_layout(title="Aligned (integer shift)", xaxis_title="Time", yaxis_title="Amplitude")
-                st.plotly_chart(fig_align, use_container_width=True)
-
-            except Exception as e:
-                st.error(f"Failed: {e}")
+        except Exception as e:
+            st.exception(e)
 
 # =========================
-# ログ表示
+# History / Export
 # =========================
+st.divider()
 st.subheader("History")
 log_df = pd.DataFrame(st.session_state.log)
 st.dataframe(log_df, use_container_width=True)
@@ -316,4 +433,4 @@ if len(log_df) > 0:
         file_name="fiber_delay_log.csv",
         mime="text/csv"
     )
-    
+``
