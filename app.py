@@ -349,4 +349,3 @@ if len(log_df) > 0:
         file_name="fiber_delay_log.csv",
         mime="text/csv"
     )
-``
