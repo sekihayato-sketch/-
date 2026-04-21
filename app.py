@@ -15,7 +15,7 @@ st.set_page_config(
     page_title="Fiber Delay Adjustment Tool (Manual / ABS target / Cut-only)",
     layout="wide"
 )
-st.title("Fiber Delay Adjustment Tool - Manual Only (ABS target / Cut-only)")
+st.title("Fiber Delay Adjustment Tool")
 st.caption("Manual mode only. ch1/ch2 late/early is determined automatically from the SIGN of measured delay.")
 
 # =====================================================
